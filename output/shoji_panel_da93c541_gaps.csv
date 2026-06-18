@@ -1,0 +1,22 @@
+﻿gap_no,gap_name,between,gap_mm
+0,left_edge_gap,left_frame - bar_1,2.64
+1,gap_1,bar_1 - bar_2,24.09
+2,gap_2,bar_2 - bar_3,29.64
+3,gap_3,bar_3 - bar_4,33.5
+4,gap_4,bar_4 - bar_5,36.52
+5,gap_5,bar_5 - bar_6,39.03
+6,gap_6,bar_6 - bar_7,41.16
+7,gap_7,bar_7 - bar_8,43.01
+8,gap_8,bar_8 - bar_9,44.62
+9,gap_9,bar_9 - bar_10,46.04
+10,gap_10,bar_10 - bar_11,47.29
+11,gap_11,bar_11 - bar_12,48.39
+12,gap_12,bar_12 - bar_13,49.34
+13,gap_13,bar_13 - bar_14,50.17
+14,gap_14,bar_14 - bar_15,50.87
+15,gap_15,bar_15 - bar_16,51.45
+16,gap_16,bar_16 - bar_17,51.93
+17,gap_17,bar_17 - bar_18,52.29
+18,gap_18,bar_18 - bar_19,52.55
+19,gap_19,bar_19 - bar_20,52.71
+20,right_edge_gap,bar_20 - right_frame,52.76

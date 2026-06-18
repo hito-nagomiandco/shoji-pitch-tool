@@ -1,0 +1,20 @@
+﻿gap_no,gap_name,between,gap_mm
+0,left_edge_gap,left_frame - bar_1,58.74
+1,gap_1,bar_1 - bar_2,58.64
+2,gap_2,bar_2 - bar_3,58.5
+3,gap_3,bar_3 - bar_4,58.31
+4,gap_4,bar_4 - bar_5,58.07
+5,gap_5,bar_5 - bar_6,57.74
+6,gap_6,bar_6 - bar_7,57.31
+7,gap_7,bar_7 - bar_8,56.73
+8,gap_8,bar_8 - bar_9,55.97
+9,gap_9,bar_9 - bar_10,54.96
+10,gap_10,bar_10 - bar_11,53.61
+11,gap_11,bar_11 - bar_12,51.83
+12,gap_12,bar_12 - bar_13,49.45
+13,gap_13,bar_13 - bar_14,46.31
+14,gap_14,bar_14 - bar_15,42.13
+15,gap_15,bar_15 - bar_16,36.58
+16,gap_16,bar_16 - bar_17,29.22
+17,gap_17,bar_17 - bar_18,19.44
+18,right_edge_gap,bar_18 - right_frame,6.46

@@ -1,0 +1,2 @@
+﻿panel_width_mm,panel_height_mm,bar_count,bar_width_mm,bar_thickness_mm,bar_length_mm,total_bar_width_mm,total_gap_width_mm,min_gap_mm,max_gap_mm,min_max_gap_ratio,curve_type,curve_strength,variation_percent,direction
+1000.0,600.0,15,5.0,12.0,600.0,75.0,925.0,11.16,74.37,0.15,cosine,0.2,85.0,right_dense
