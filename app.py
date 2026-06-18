@@ -1,289 +1,135 @@
-import uuid
-from pathlib import Path
+# app.py
+# -*- coding: utf-8 -*-
 
-import pandas as pd
+from pathlib import Path
+import tempfile
+
 import streamlit as st
 
-from shoji_panel_calculator import (
-    ShojiPanelParams,
-    calculate_shoji_panel,
-    plot_shoji_panel,
-)
+from shoji_panel_calculator import ShojiParams, calculate_shoji, save_outputs
 
 
-st.set_page_config(
-    page_title="障子ピッチツール",
-    page_icon="▥",
-    layout="centered",
-    initial_sidebar_state="collapsed",
-)
-
-st.markdown(
-    """
-    <style>
-    .block-container {
-        padding-top: 1rem;
-        padding-left: 1rem;
-        padding-right: 1rem;
-        max-width: 760px;
-    }
-    div.stButton > button,
-    div.stDownloadButton > button {
-        width: 100%;
-        min-height: 3.0rem;
-        border-radius: 0.75rem;
-        font-size: 1.05rem;
-    }
-    [data-testid="stMetricValue"] {
-        font-size: 1.25rem;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.set_page_config(page_title="障子ピッチツール", page_icon="▦", layout="wide")
 
 st.title("障子ピッチツール")
-st.caption("1枚の小パネル用｜曲線的に変化する縦組子の間隔を計算・可視化")
+st.caption("密度変化のある障子割付と、施工用の片面座標を作成します。")
 
+with st.sidebar:
+    st.header("基本寸法")
+    panel_width = st.number_input("有効幅 [mm]", min_value=100.0, max_value=10000.0, value=1000.0, step=10.0)
+    panel_height = st.number_input("パネル高さ [mm]", min_value=100.0, max_value=10000.0, value=600.0, step=10.0)
+    bar_width = st.number_input("組子幅・見付 [mm]", min_value=1.0, max_value=100.0, value=5.0, step=0.5)
+    bar_thickness = st.number_input("組子厚み [mm]", min_value=1.0, max_value=100.0, value=12.0, step=0.5)
+    bar_count = st.number_input("組子本数", min_value=1, max_value=200, value=20, step=1)
 
-# --------------------------
-# Presets
-# --------------------------
-preset = st.selectbox(
-    "プリセット",
-    [
-        "360×600 / 18本 / 右に密",
-        "360×600 / 18本 / 左に密",
-        "360×600 / 18本 / 中央に密",
-        "カスタム",
-    ],
-)
-
-if preset == "360×600 / 18本 / 右に密":
-    default = dict(panel_width=360.0, panel_height=600.0, bar_width=5.0, bar_thickness=12.0,
-                   bar_count=18, variation_percent=70.0, curve_type="cosine", curve_strength=2.0,
-                   direction="right_dense")
-elif preset == "360×600 / 18本 / 左に密":
-    default = dict(panel_width=360.0, panel_height=600.0, bar_width=5.0, bar_thickness=12.0,
-                   bar_count=18, variation_percent=70.0, curve_type="cosine", curve_strength=2.0,
-                   direction="left_dense")
-elif preset == "360×600 / 18本 / 中央に密":
-    default = dict(panel_width=360.0, panel_height=600.0, bar_width=5.0, bar_thickness=12.0,
-                   bar_count=18, variation_percent=70.0, curve_type="cosine", curve_strength=2.0,
-                   direction="center_dense")
-else:
-    default = dict(panel_width=360.0, panel_height=600.0, bar_width=5.0, bar_thickness=12.0,
-                   bar_count=18, variation_percent=70.0, curve_type="cosine", curve_strength=2.0,
-                   direction="right_dense")
-
-
-curve_labels = {
-    "線形": "linear",
-    "べき関数": "power",
-    "余弦": "cosine",
-    "指数関数": "exponential",
-}
-
-direction_labels = {
-    "右に向かって密": "right_dense",
-    "左に向かって密": "left_dense",
-    "中央に向かって密": "center_dense",
-    "両端に向かって密": "edge_dense",
-}
-
-reverse_curve_labels = {v: k for k, v in curve_labels.items()}
-reverse_direction_labels = {v: k for k, v in direction_labels.items()}
-
-
-# --------------------------
-# Input form
-# --------------------------
-with st.form("shoji_form"):
-    st.subheader("パネル寸法")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        panel_width = st.number_input(
-            "有効幅 W [mm]",
-            min_value=10.0,
-            max_value=5000.0,
-            value=float(default["panel_width"]),
-            step=1.0,
-            format="%.1f",
-        )
-    with col2:
-        panel_height = st.number_input(
-            "有効高さ H [mm]",
-            min_value=10.0,
-            max_value=5000.0,
-            value=float(default["panel_height"]),
-            step=1.0,
-            format="%.1f",
-        )
-
-    st.subheader("組子寸法")
-
-    col3, col4 = st.columns(2)
-    with col3:
-        bar_width = st.number_input(
-            "組子幅 [mm]",
-            min_value=0.1,
-            max_value=200.0,
-            value=float(default["bar_width"]),
-            step=0.1,
-            format="%.1f",
-        )
-    with col4:
-        bar_thickness = st.number_input(
-            "組子厚み [mm]",
-            min_value=0.1,
-            max_value=200.0,
-            value=float(default["bar_thickness"]),
-            step=0.1,
-            format="%.1f",
-        )
-
-    col5, col6 = st.columns(2)
-    with col5:
-        bar_count = st.number_input(
-            "組子本数",
-            min_value=1,
-            max_value=300,
-            value=int(default["bar_count"]),
-            step=1,
-        )
-    with col6:
-        bar_length_mode = st.radio(
-            "組子長さ",
-            ["高さと同じ", "指定する"],
-            horizontal=True,
-        )
-
-    if bar_length_mode == "指定する":
-        bar_length = st.number_input(
-            "組子長さ [mm]",
-            min_value=1.0,
-            max_value=5000.0,
-            value=float(panel_height),
-            step=1.0,
-            format="%.1f",
-        )
-    else:
-        bar_length = None
-
-    st.subheader("ピッチ変化")
+    st.divider()
+    st.header("密度変化")
+    max_gap = st.number_input("最大隙間・疎側 [mm]", min_value=1.0, max_value=1000.0, value=150.0, step=1.0)
+    min_gap = st.number_input("最小隙間・密側 [mm]", min_value=0.5, max_value=500.0, value=12.0, step=0.5)
 
     curve_type_label = st.selectbox(
         "曲線タイプ",
-        list(curve_labels.keys()),
-        index=list(curve_labels.keys()).index(reverse_curve_labels[default["curve_type"]]),
+        options=["余弦 cosine", "べき乗 power", "指数 exponential", "直線 linear"],
+        index=0,
+    )
+    curve_type = {
+        "余弦 cosine": "cosine",
+        "べき乗 power": "power",
+        "指数 exponential": "exponential",
+        "直線 linear": "linear",
+    }[curve_type_label]
+
+    direction_label = st.selectbox("密になる方向", options=["右に向かって密", "左に向かって密"], index=0)
+    direction = "right_dense" if direction_label == "右に向かって密" else "left_dense"
+
+    change_position = st.slider(
+        "変化位置",
+        min_value=0.05,
+        max_value=0.95,
+        value=0.35,
+        step=0.01,
+        help="0.5が中央。0.35なら疎側寄りに変化が出ます。",
+    )
+    sparse_motion = st.slider(
+        "疎側の動き",
+        min_value=0.0,
+        max_value=100.0,
+        value=70.0,
+        step=1.0,
+        help="値を大きくすると、疎側から早めに変化が出ます。",
     )
 
-    direction_label = st.selectbox(
-        "密になる方向",
-        list(direction_labels.keys()),
-        index=list(direction_labels.keys()).index(reverse_direction_labels[default["direction"]]),
-    )
+    st.divider()
+    st.header("加工設定")
+    round_unit = st.selectbox("丸め単位 [mm]", options=[0.1, 0.5, 1.0, 2.0, 5.0], index=1)
+    generate = st.button("計算する", type="primary")
 
-    variation_percent = st.slider(
-        "変化率 [%]",
-        min_value=0,
-        max_value=95,
-        value=int(default["variation_percent"]),
-        step=1,
-    )
+if not generate:
+    st.info("左のパラメータを設定して「計算する」を押してください。")
+    st.stop()
 
-    curve_strength = st.slider(
-        "曲線の強さ",
-        min_value=0.2,
-        max_value=6.0,
-        value=float(default["curve_strength"]),
-        step=0.1,
-    )
-
-    show_gap_labels = st.checkbox("PNGに隙間寸法を表示", value=True)
-
-    submitted = st.form_submit_button("PNGを生成")
-
-
-# --------------------------
-# Generate
-# --------------------------
-if submitted:
-    params = ShojiPanelParams(
-        panel_width=float(panel_width),
-        panel_height=float(panel_height),
-        bar_width=float(bar_width),
-        bar_thickness=float(bar_thickness),
-        bar_length=None if bar_length is None else float(bar_length),
+try:
+    params = ShojiParams(
+        panel_width=panel_width,
+        panel_height=panel_height,
+        bar_width=bar_width,
+        bar_thickness=bar_thickness,
         bar_count=int(bar_count),
-        variation_percent=float(variation_percent),
-        curve_type=curve_labels[curve_type_label],
-        curve_strength=float(curve_strength),
-        direction=direction_labels[direction_label],
-        show_gap_labels=bool(show_gap_labels),
+        max_gap=max_gap,
+        min_gap=min_gap,
+        change_position=change_position,
+        sparse_motion=sparse_motion,
+        curve_type=curve_type,
+        direction=direction,
+        round_unit=float(round_unit),
     )
+    result = calculate_shoji(params)
+except Exception as e:
+    st.error(f"計算エラー: {e}")
+    st.stop()
 
-    try:
-        bars_df, gaps_df, summary = calculate_shoji_panel(params)
-    except Exception as e:
-        st.error("この条件では計算できません。")
-        st.warning(str(e))
-        st.stop()
+with tempfile.TemporaryDirectory() as tmpdir:
+    paths = save_outputs(result, tmpdir)
+    summary = result.summary.iloc[0]
 
-    output_dir = Path("output")
-    output_dir.mkdir(exist_ok=True)
-    run_id = uuid.uuid4().hex[:8]
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("実際の最大隙間", f"{summary['actual_max_gap']:.1f} mm")
+    with col2:
+        st.metric("実際の最小隙間", f"{summary['actual_min_gap']:.1f} mm")
+    with col3:
+        st.metric("隙間合計", f"{summary['actual_gap_total']:.1f} mm")
+    with col4:
+        st.metric("全体幅", f"{summary['actual_total_width']:.1f} mm")
 
-    png_path = output_dir / f"shoji_panel_{run_id}.png"
-    bars_csv_path = output_dir / f"shoji_panel_{run_id}_bars.csv"
-    gaps_csv_path = output_dir / f"shoji_panel_{run_id}_gaps.csv"
-    summary_csv_path = output_dir / f"shoji_panel_{run_id}_summary.csv"
+    st.subheader("割付図")
+    st.image(str(paths["png"]), use_container_width=True)
 
-    try:
-        plot_shoji_panel(
-            bars_df,
-            gaps_df,
-            summary,
-            png_path,
-            show_gap_labels=show_gap_labels,
-        )
-    except Exception as e:
-        st.error("PNG生成中にエラーが出ました。")
-        st.code(repr(e))
-        st.stop()
+    st.subheader("寸法表")
+    tab1, tab2, tab3 = st.tabs(["施工用 桟座標", "隙間寸法", "概要"])
 
-    bars_df.round(2).to_csv(bars_csv_path, index=False, encoding="utf-8-sig")
-    gaps_df.round(2).to_csv(gaps_csv_path, index=False, encoding="utf-8-sig")
-    pd.DataFrame([summary]).round(2).to_csv(summary_csv_path, index=False, encoding="utf-8-sig")
+    with tab1:
+        st.caption("芯芯ではなく、桟の片面座標を出しています。左端0点・右端0点の両方から確認できます。")
+        st.dataframe(result.bars, use_container_width=True)
 
-    st.success("生成できました。")
+    with tab2:
+        st.dataframe(result.gaps, use_container_width=True)
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("最小隙間", f"{summary['min_gap_mm']:.1f} mm")
-    with c2:
-        st.metric("最大隙間", f"{summary['max_gap_mm']:.1f} mm")
-    with c3:
-        st.metric("隙間比", f"{summary['min_max_gap_ratio']:.2f}")
+    with tab3:
+        st.dataframe(result.summary, use_container_width=True)
 
-    st.image(str(png_path), caption="生成された障子ピッチ図", use_container_width=True)
+    st.subheader("ダウンロード")
+    col_a, col_b, col_c, col_d = st.columns(4)
 
-    with st.expander("隙間寸法表"):
-        st.dataframe(gaps_df.round(2), use_container_width=True, hide_index=True)
-
-    with st.expander("組子位置表"):
-        st.dataframe(bars_df.round(2), use_container_width=True, hide_index=True)
-
-    with st.expander("ダウンロード"):
-        with open(png_path, "rb") as f:
-            st.download_button("PNGを保存", f, file_name=png_path.name, mime="image/png")
-
-        with open(gaps_csv_path, "rb") as f:
-            st.download_button("隙間寸法CSV", f, file_name=gaps_csv_path.name, mime="text/csv")
-
-        with open(bars_csv_path, "rb") as f:
-            st.download_button("組子位置CSV", f, file_name=bars_csv_path.name, mime="text/csv")
-
-        with open(summary_csv_path, "rb") as f:
-            st.download_button("サマリーCSV", f, file_name=summary_csv_path.name, mime="text/csv")
+    with col_a:
+        with open(paths["png"], "rb") as f:
+            st.download_button("PNG", f, file_name=Path(paths["png"]).name, mime="image/png")
+    with col_b:
+        with open(paths["bar_coordinates_csv"], "rb") as f:
+            st.download_button("施工用 桟座標CSV", f, file_name=Path(paths["bar_coordinates_csv"]).name, mime="text/csv")
+    with col_c:
+        with open(paths["gaps_csv"], "rb") as f:
+            st.download_button("隙間寸法CSV", f, file_name=Path(paths["gaps_csv"]).name, mime="text/csv")
+    with col_d:
+        with open(paths["summary_csv"], "rb") as f:
+            st.download_button("概要CSV", f, file_name=Path(paths["summary_csv"]).name, mime="text/csv")

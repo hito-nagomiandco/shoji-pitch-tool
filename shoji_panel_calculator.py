@@ -1,14 +1,7 @@
-#!/usr/bin/env python
+# shoji_panel_calculator.py
 # -*- coding: utf-8 -*-
-"""
-Shoji panel pitch calculator
 
-A small calculation engine for a single shoji sub-panel.
-It generates:
-- bar positions
-- gap dimensions
-- visual PNG
-"""
+from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,274 +13,328 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 
+CurveType = Literal["cosine", "power", "exponential", "linear"]
+DirectionType = Literal["right_dense", "left_dense"]
+
+
 @dataclass
-class ShojiPanelParams:
-    panel_width: float = 360.0
+class ShojiParams:
+    panel_width: float = 1000.0
     panel_height: float = 600.0
     bar_width: float = 5.0
     bar_thickness: float = 12.0
-    bar_length: float | None = None
-    bar_count: int = 18
-    variation_percent: float = 70.0
-    curve_type: Literal["linear", "power", "cosine", "exponential"] = "cosine"
-    curve_strength: float = 2.0
-    direction: Literal["right_dense", "left_dense", "center_dense", "edge_dense"] = "right_dense"
-    show_gap_labels: bool = True
+    bar_count: int = 20
+    max_gap: float = 150.0
+    min_gap: float = 12.0
+    change_position: float = 0.35
+    sparse_motion: float = 70.0
+    curve_type: CurveType = "cosine"
+    direction: DirectionType = "right_dense"
+    round_unit: float = 0.5
 
 
-def normalize01(x: np.ndarray) -> np.ndarray:
-    mn = float(np.min(x))
-    mx = float(np.max(x))
-    if abs(mx - mn) < 1e-12:
-        return np.zeros_like(x)
-    return (x - mn) / (mx - mn)
+@dataclass
+class ShojiResult:
+    params: ShojiParams
+    gaps: pd.DataFrame
+    bars: pd.DataFrame
+    summary: pd.DataFrame
 
 
-def curve_profile(u: np.ndarray, curve_type: str, curve_strength: float) -> np.ndarray:
-    u = np.asarray(u, dtype=float)
+def round_to_unit(values: np.ndarray, unit: float) -> np.ndarray:
+    if unit <= 0:
+        return values
+    return np.round(values / unit) * unit
+
+
+def make_position_array(n: int) -> np.ndarray:
+    if n <= 1:
+        return np.array([0.0])
+    return np.linspace(0.0, 1.0, n)
+
+
+def apply_sparse_motion(u: np.ndarray, sparse_motion: float) -> np.ndarray:
+    """
+    疎側の動き。
+    値が大きいほど、疎側から早めに変化が出る。
+    """
+    sparse_motion = float(np.clip(sparse_motion, 0.0, 100.0))
+    gamma = 1.0 - 0.75 * (sparse_motion / 100.0)
+    gamma = max(gamma, 0.15)
+    return np.power(u, gamma)
+
+
+def apply_change_position(u: np.ndarray, change_position: float) -> np.ndarray:
+    """
+    変化位置を調整する。
+    0.5が標準。0.35なら疎側寄りに変化が出る。
+    """
+    cp = float(np.clip(change_position, 0.05, 0.95))
+    out = np.empty_like(u)
+    left = u <= cp
+    right = ~left
+    out[left] = 0.5 * (u[left] / cp)
+    out[right] = 0.5 + 0.5 * ((u[right] - cp) / (1.0 - cp))
+    return np.clip(out, 0.0, 1.0)
+
+
+def curve_values(n: int, curve_type: CurveType, change_position: float, sparse_motion: float) -> np.ndarray:
+    """
+    0〜1の曲線値を作る。
+    0 = 疎側、1 = 密側。
+    """
+    u = make_position_array(n)
+    u = apply_sparse_motion(u, sparse_motion)
+    u = apply_change_position(u, change_position)
 
     if curve_type == "linear":
-        y = u
-
-    elif curve_type == "power":
-        k = max(float(curve_strength), 0.01)
-        y = u ** k
-
+        v = u
     elif curve_type == "cosine":
-        # Smooth and visually natural
-        y = 0.5 - 0.5 * np.cos(np.pi * u)
-        k = max(float(curve_strength), 0.01)
-        if abs(k - 1.0) > 1e-9:
-            y = y ** (1.0 / k)
-
+        v = 0.5 - 0.5 * np.cos(np.pi * u)
+    elif curve_type == "power":
+        v = np.power(u, 2.0)
     elif curve_type == "exponential":
-        k = max(float(curve_strength), 0.01)
-        y = (np.exp(k * u) - 1.0) / (np.exp(k) - 1.0)
-
+        k = 4.0
+        v = (np.exp(k * u) - 1.0) / (np.exp(k) - 1.0)
     else:
-        raise ValueError(f"Unsupported curve_type: {curve_type}")
+        raise ValueError(f"Unknown curve_type: {curve_type}")
 
-    return normalize01(y)
-
-
-def make_gap_weights(gap_count: int, params: ShojiPanelParams) -> np.ndarray:
-    if gap_count < 2:
-        return np.ones(gap_count)
-
-    u = np.linspace(0.0, 1.0, gap_count)
-
-    # 0% = equal spacing, 95% = very strong contrast
-    variation = min(max(float(params.variation_percent), 0.0), 95.0)
-    min_ratio = 1.0 - variation / 100.0
-
-    if params.direction in ["right_dense", "left_dense"]:
-        p = curve_profile(u, params.curve_type, params.curve_strength)
-
-        if params.direction == "right_dense":
-            # wide on left, dense on right
-            weights = 1.0 - (1.0 - min_ratio) * p
-        else:
-            # dense on left, wide on right
-            weights = min_ratio + (1.0 - min_ratio) * p
-
-    elif params.direction == "center_dense":
-        # dense near center, wide near edges
-        edge_profile = np.abs(2.0 * u - 1.0)
-        k = max(float(params.curve_strength), 0.01)
-        weights = min_ratio + (1.0 - min_ratio) * (edge_profile ** k)
-
-    elif params.direction == "edge_dense":
-        # dense near edges, wide near center
-        center_profile = 1.0 - np.abs(2.0 * u - 1.0)
-        k = max(float(params.curve_strength), 0.01)
-        weights = min_ratio + (1.0 - min_ratio) * (center_profile ** k)
-
-    else:
-        raise ValueError(f"Unsupported direction: {params.direction}")
-
-    return np.maximum(weights, 1e-9)
+    return np.clip(v, 0.0, 1.0)
 
 
-def calculate_shoji_panel(params: ShojiPanelParams):
-    W = float(params.panel_width)
-    H = float(params.panel_height)
-    b = float(params.bar_width)
-    N = int(params.bar_count)
+def make_raw_gaps(params: ShojiParams) -> np.ndarray:
+    gap_count = params.bar_count + 1
+    v = curve_values(gap_count, params.curve_type, params.change_position, params.sparse_motion)
+    gaps = params.max_gap + (params.min_gap - params.max_gap) * v
+    if params.direction == "left_dense":
+        gaps = gaps[::-1]
+    return gaps
 
-    if params.bar_length is None:
-        bar_length = H
-    else:
-        bar_length = float(params.bar_length)
 
-    if W <= 0 or H <= 0:
-        raise ValueError("Panel width and height must be positive.")
+def fit_gaps_to_width(params: ShojiParams, raw_gaps: np.ndarray) -> np.ndarray:
+    total_bar_width = params.bar_width * params.bar_count
+    target_gap_total = params.panel_width - total_bar_width
+    if target_gap_total <= 0:
+        raise ValueError("有効幅に対して、組子幅×本数が大きすぎます。")
+    raw_total = float(np.sum(raw_gaps))
+    if raw_total <= 0:
+        raise ValueError("隙間の合計が0以下です。")
+    return raw_gaps * (target_gap_total / raw_total)
 
-    if N <= 0:
-        raise ValueError("Bar count must be 1 or more.")
 
-    if b <= 0:
-        raise ValueError("Bar width must be positive.")
+def adjust_rounding_error(gaps: np.ndarray, target_total: float, round_unit: float) -> np.ndarray:
+    if round_unit <= 0:
+        return gaps
+    rounded = round_to_unit(gaps, round_unit)
+    diff = target_total - float(np.sum(rounded))
+    if abs(diff) < 1e-9:
+        return rounded
+    steps = int(round(diff / round_unit))
+    if steps == 0:
+        return rounded
 
-    total_bar_width = N * b
-    total_gap_width = W - total_bar_width
+    adjusted = rounded.copy()
+    n = len(adjusted)
+    order = list(range(n))
+    center = (n - 1) / 2
+    order.sort(key=lambda i: abs(i - center))
+    step_value = round_unit if steps > 0 else -round_unit
 
-    if total_gap_width <= 0:
-        raise ValueError(
-            f"Panel width is too small. panel_width={W:.2f}, bar_count*bar_width={total_bar_width:.2f}"
-        )
+    for k in range(abs(steps)):
+        idx = order[k % n]
+        adjusted[idx] += step_value
+    return adjusted
 
-    gap_count = N + 1
-    weights = make_gap_weights(gap_count, params)
-    gaps = total_gap_width * weights / np.sum(weights)
+
+def calculate_shoji(params: ShojiParams) -> ShojiResult:
+    if params.bar_count < 1:
+        raise ValueError("組子本数は1以上にしてください。")
+    if params.bar_width <= 0:
+        raise ValueError("組子幅は0より大きくしてください。")
+    if params.panel_width <= 0:
+        raise ValueError("有効幅は0より大きくしてください。")
+    if params.panel_height <= 0:
+        raise ValueError("パネル高さは0より大きくしてください。")
+    if params.max_gap <= params.min_gap:
+        raise ValueError("最大隙間は最小隙間より大きくしてください。")
+
+    raw_gaps = make_raw_gaps(params)
+    fitted_gaps = fit_gaps_to_width(params, raw_gaps)
+    target_gap_total = params.panel_width - params.bar_width * params.bar_count
+    rounded_gaps = adjust_rounding_error(fitted_gaps, target_gap_total, params.round_unit)
 
     bars = []
-    x = gaps[0]
+    x = 0.0
+    for i in range(params.bar_count):
+        left_gap = float(rounded_gaps[i])
+        right_gap = float(rounded_gaps[i + 1])
+        x += left_gap
 
-    for i in range(N):
-        x_left = x
-        x_right = x_left + b
-        x_center = (x_left + x_right) / 2.0
+        x_left_from_left = x
+        x_right_from_left = x_left_from_left + params.bar_width
+        x_center_from_left = x_left_from_left + params.bar_width / 2.0
+
+        # 右端を0点として、右から左へ測る座標。
+        x_right_from_right = params.panel_width - x_right_from_left
+        x_left_from_right = params.panel_width - x_left_from_left
+        x_center_from_right = params.panel_width - x_center_from_left
 
         bars.append({
             "bar_no": i + 1,
-            "x_left_mm": x_left,
-            "x_center_mm": x_center,
-            "x_right_mm": x_right,
-            "bar_width_mm": b,
-            "bar_thickness_mm": float(params.bar_thickness),
-            "bar_length_mm": bar_length,
+            "x_left_from_left": x_left_from_left,
+            "x_right_from_left": x_right_from_left,
+            "x_center_from_left": x_center_from_left,
+            "x_right_from_right": x_right_from_right,
+            "x_left_from_right": x_left_from_right,
+            "x_center_from_right": x_center_from_right,
+            "left_gap": left_gap,
+            "right_gap": right_gap,
+            "bar_width": params.bar_width,
+            "bar_height": params.panel_height,
+            "bar_thickness": params.bar_thickness,
         })
+        x = x_right_from_left
 
-        if i < N - 1:
-            x = x_right + gaps[i + 1]
-
-    gap_rows = []
-    for i, g in enumerate(gaps):
-        if i == 0:
-            name = "left_edge_gap"
-            between = "left_frame - bar_1"
-        elif i == gap_count - 1:
-            name = "right_edge_gap"
-            between = f"bar_{N} - right_frame"
-        else:
-            name = f"gap_{i}"
-            between = f"bar_{i} - bar_{i+1}"
-
-        gap_rows.append({
-            "gap_no": i,
-            "gap_name": name,
-            "between": between,
-            "gap_mm": g,
-        })
-
+    gaps_df = pd.DataFrame({
+        "gap_no": np.arange(1, len(rounded_gaps) + 1),
+        "gap_width": rounded_gaps,
+    })
     bars_df = pd.DataFrame(bars)
-    gaps_df = pd.DataFrame(gap_rows)
+    actual_total_width = float(np.sum(rounded_gaps)) + params.bar_count * params.bar_width
 
-    summary = {
-        "panel_width_mm": W,
-        "panel_height_mm": H,
-        "bar_count": N,
-        "bar_width_mm": b,
-        "bar_thickness_mm": float(params.bar_thickness),
-        "bar_length_mm": bar_length,
-        "total_bar_width_mm": total_bar_width,
-        "total_gap_width_mm": total_gap_width,
-        "min_gap_mm": float(np.min(gaps)),
-        "max_gap_mm": float(np.max(gaps)),
-        "min_max_gap_ratio": float(np.min(gaps) / np.max(gaps)),
+    summary_df = pd.DataFrame([{
+        "panel_width": params.panel_width,
+        "panel_height": params.panel_height,
+        "bar_width": params.bar_width,
+        "bar_thickness": params.bar_thickness,
+        "bar_count": params.bar_count,
+        "gap_count": params.bar_count + 1,
+        "target_gap_total": target_gap_total,
+        "actual_gap_total": float(np.sum(rounded_gaps)),
+        "actual_total_width": actual_total_width,
+        "input_max_gap": params.max_gap,
+        "input_min_gap": params.min_gap,
+        "actual_max_gap": float(np.max(rounded_gaps)),
+        "actual_min_gap": float(np.min(rounded_gaps)),
+        "change_position": params.change_position,
+        "sparse_motion": params.sparse_motion,
         "curve_type": params.curve_type,
-        "curve_strength": float(params.curve_strength),
-        "variation_percent": float(params.variation_percent),
         "direction": params.direction,
+        "round_unit": params.round_unit,
+    }])
+
+    return ShojiResult(params=params, gaps=gaps_df, bars=bars_df, summary=summary_df)
+
+
+def draw_shoji(result: ShojiResult, output_path: str | Path) -> Path:
+    params = result.params
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig_w = 12
+    fig_h = max(4, fig_w * params.panel_height / params.panel_width)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    ax.add_patch(Rectangle((0, 0), params.panel_width, params.panel_height, fill=False, linewidth=1.5))
+
+    for _, row in result.bars.iterrows():
+        ax.add_patch(Rectangle(
+            (row["x_left_from_left"], 0),
+            row["bar_width"],
+            params.panel_height,
+            fill=True,
+            alpha=0.85,
+        ))
+
+    y_text = -params.panel_height * 0.06
+    for _, row in result.gaps.iterrows():
+        gap_no = int(row["gap_no"])
+        gap_width = float(row["gap_width"])
+        if len(result.gaps) <= 25 or gap_no in [1, len(result.gaps)] or gap_no % 2 == 0:
+            if gap_no == 1:
+                x0 = 0.0
+            else:
+                prev_bar = result.bars.iloc[gap_no - 2]
+                x0 = float(prev_bar["x_right_from_left"])
+            xc = x0 + gap_width / 2.0
+            ax.text(xc, y_text, f"{gap_width:.1f}", ha="center", va="top", fontsize=7, rotation=90)
+
+    y_top = params.panel_height * 1.02
+    for _, row in result.bars.iterrows():
+        bar_no = int(row["bar_no"])
+        if params.bar_count <= 25 or bar_no in [1, params.bar_count] or bar_no % 2 == 0:
+            ax.text(
+                row["x_left_from_left"],
+                y_top,
+                f"{row['x_left_from_left']:.1f}",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                rotation=90,
+            )
+
+    title = (
+        f"Shoji pitch | W={params.panel_width:g}mm, N={params.bar_count}, "
+        f"max={params.max_gap:g}, min={params.min_gap:g}, {params.curve_type}"
+    )
+    ax.set_title(title)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlim(-params.panel_width * 0.04, params.panel_width * 1.04)
+    ax.set_ylim(-params.panel_height * 0.16, params.panel_height * 1.12)
+    ax.set_xlabel("Width [mm]")
+    ax.set_ylabel("Height [mm]")
+    ax.grid(True, linewidth=0.3, alpha=0.4)
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=220)
+    plt.close(fig)
+    return output_path
+
+
+def save_outputs(result: ShojiResult, output_dir: str | Path) -> dict[str, Path]:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    params = result.params
+    base_name = (
+        f"shoji_W{int(params.panel_width)}_H{int(params.panel_height)}"
+        f"_bar{params.bar_width:g}_N{params.bar_count}_{params.curve_type}"
+    )
+
+    png_path = output_dir / f"{base_name}.png"
+    bars_path = output_dir / f"{base_name}_bar_coordinates.csv"
+    gaps_path = output_dir / f"{base_name}_gaps.csv"
+    summary_path = output_dir / f"{base_name}_summary.csv"
+
+    draw_shoji(result, png_path)
+    result.bars.to_csv(bars_path, index=False, encoding="utf-8-sig")
+    result.gaps.to_csv(gaps_path, index=False, encoding="utf-8-sig")
+    result.summary.to_csv(summary_path, index=False, encoding="utf-8-sig")
+
+    return {
+        "png": png_path,
+        "bar_coordinates_csv": bars_path,
+        "gaps_csv": gaps_path,
+        "summary_csv": summary_path,
     }
 
-    return bars_df, gaps_df, summary
 
-
-def draw_dimension_arrow(ax, x1, x2, y, text, fs=7.5, color="black"):
-    ax.annotate(
-        "",
-        xy=(x2, y),
-        xytext=(x1, y),
-        arrowprops=dict(arrowstyle="<->", lw=0.65, color=color, shrinkA=0, shrinkB=0),
+if __name__ == "__main__":
+    params = ShojiParams(
+        panel_width=1000,
+        panel_height=600,
+        bar_width=5,
+        bar_thickness=12,
+        bar_count=20,
+        max_gap=150,
+        min_gap=12,
+        change_position=0.35,
+        sparse_motion=70,
+        curve_type="cosine",
+        direction="right_dense",
+        round_unit=0.5,
     )
-    ax.text(
-        (x1 + x2) / 2.0,
-        y,
-        text,
-        fontsize=fs,
-        ha="center",
-        va="center",
-        bbox=dict(boxstyle="round,pad=0.08", facecolor="white", edgecolor="none"),
-        color=color,
-    )
-
-
-def plot_shoji_panel(
-    bars_df: pd.DataFrame,
-    gaps_df: pd.DataFrame,
-    summary: dict,
-    out_png: str | Path,
-    show_gap_labels: bool = True,
-) -> None:
-    W = summary["panel_width_mm"]
-    H = summary["panel_height_mm"]
-
-    # Wider than tall, because it represents one horizontal sub-panel.
-    fig, ax = plt.subplots(figsize=(8.0, 5.2), facecolor="white")
-
-    # Panel background
-    ax.add_patch(Rectangle((0, 0), W, H, facecolor="#fff8e7", edgecolor="black", linewidth=1.2))
-
-    # Vertical kumiko bars
-    for _, row in bars_df.iterrows():
-        ax.add_patch(
-            Rectangle(
-                (row["x_left_mm"], 0),
-                row["bar_width_mm"],
-                H,
-                facecolor="#a87536",
-                edgecolor="black",
-                linewidth=0.55,
-            )
-        )
-
-    # Gap labels
-    if show_gap_labels:
-        y_dim = -H * 0.07
-        for _, g in gaps_df.iterrows():
-            gap_no = int(g["gap_no"])
-            gap_val = float(g["gap_mm"])
-
-            if gap_no == 0:
-                x1 = 0.0
-                x2 = float(bars_df.iloc[0]["x_left_mm"])
-            elif gap_no == len(gaps_df) - 1:
-                x1 = float(bars_df.iloc[-1]["x_right_mm"])
-                x2 = W
-            else:
-                x1 = float(bars_df.iloc[gap_no - 1]["x_right_mm"])
-                x2 = float(bars_df.iloc[gap_no]["x_left_mm"])
-
-            fs = 6.6 if len(gaps_df) > 16 else 7.5
-            draw_dimension_arrow(ax, x1, x2, y_dim, f"{gap_val:.1f}", fs=fs)
-
-    # Overall width
-    draw_dimension_arrow(ax, 0, W, -H * 0.16, f"W = {W:.1f} mm", fs=9)
-
-    info = (
-        f"N={summary['bar_count']}  bar={summary['bar_width_mm']:.1f}mm  "
-        f"min={summary['min_gap_mm']:.1f}  max={summary['max_gap_mm']:.1f}  "
-        f"{summary['curve_type']} / {summary['direction']} / {summary['variation_percent']:.0f}%"
-    )
-    ax.text(0, H + H * 0.05, info, fontsize=9, ha="left", va="bottom")
-
-    ax.set_aspect("equal", adjustable="box")
-    ax.axis("off")
-
-    margin_x = W * 0.03
-    ax.set_xlim(-margin_x, W + margin_x)
-    ax.set_ylim(-H * 0.23, H * 1.13)
-
-    fig.savefig(out_png, dpi=300, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
+    result = calculate_shoji(params)
+    paths = save_outputs(result, "output")
+    print(result.summary)
+    print(result.gaps)
+    print(result.bars)
+    print(paths)
